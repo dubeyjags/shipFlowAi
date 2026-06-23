@@ -1,0 +1,13 @@
+{
+  "name": "monorepo",
+  "private": true,
+  "types": "module",
+  "packageManager": "pnpm@10.33.4",
+  "scripts": {
+    "dev": "turbo dev",
+    "build": "turbo build"
+  },
+  "devDependencies": {
+    "turbo": "^2.9.18"
+  }
+}

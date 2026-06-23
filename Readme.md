@@ -1,6 +1,6 @@
 # ShipFlowAI
 
-## tRPC Monorepo
+## tRPC Monorepo ☑️
 ## Postgress DB
 ## Prisma
 ## BetterAuth 
