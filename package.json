@@ -9,5 +9,14 @@
   },
   "devDependencies": {
     "turbo": "^2.9.18"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@prisma/client",
+      "@prisma/engines",
+      "prisma",
+      "sharp",
+      "unrs-resolver"
+    ]
   }
 }

@@ -15,6 +15,7 @@
     "typescript": "^6.0.3"
   },
   "dependencies": {
+    "@monorepo/db": "workspace:*",
     "@monorepo/utils": "workspace:*",
     "@trpc/server": "^11.18.0"
   }

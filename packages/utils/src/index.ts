@@ -5,4 +5,10 @@ export const createUserSchema = z.object({
     password: z.string().min(6, "Password must be at least 6 characters long")
 })
 
-export type CreateUserSchema = z.infer<typeof createUserSchema>; // zod will create schema like this
+export type CreateUserSchema = z.infer<typeof createUserSchema>;
+
+export const createTestSchema = z.object({
+    name: z.string().min(1, "Name is required"),
+})
+
+export type CreateTestSchema = z.infer<typeof createTestSchema>;
