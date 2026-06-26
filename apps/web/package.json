@@ -9,10 +9,12 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@monorepo/auth": "workspace:*",
     "@tanstack/react-query": "^5.101.0",
     "@trpc/client": "^11.18.0",
     "@trpc/react-query": "^11.18.0",
     "axios": "^1.18.1",
+    "better-auth": "^1.6.20",
     "next": "16.2.9",
     "react": "19.2.4",
     "react-dom": "19.2.4"

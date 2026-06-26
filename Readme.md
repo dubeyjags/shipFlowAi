@@ -4,7 +4,7 @@
 `pnpm dev`
 `pnpm build`
 
-## Postgress DB & Prisma
+## Postgress DB & Prisma 
 ```
 New: packages/db/ — the DB package
 
@@ -29,7 +29,6 @@ package.json	Added pnpm.onlyBuiltDependencies for Prisma
 >packages/db
 `npx prisma migrate dev`
 `npx prisma generate`
-
 ## BetterAuth 
 ## ShadCN UI
 - For UI and Frontend
