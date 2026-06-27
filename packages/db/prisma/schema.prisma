@@ -8,6 +8,13 @@ datasource db {
   provider = "postgresql"
 }
 
+// ── Test ─────────────────────────────────────────────────────────────────────
+
+model Test {
+  id   String @id @default(cuid())
+  name String
+}
+
 // ── Core ─────────────────────────────────────────────────────────────────────
 
 model User {

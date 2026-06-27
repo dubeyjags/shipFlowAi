@@ -1,25 +1,16 @@
-import { signInWithGithub } from "@/lib/auth-actions";
+import GithubSignInForm from "@/components/auth/github-sign-in-form";
 
-type GithubSignInFormProps = {
-    callbackUrl?: string;
-};
+export default async function SignInPage({
+    searchParams,
+}: {
+    searchParams: Promise<{ callbackUrl?: string }>;
+}) {
+    const { callbackUrl } = await searchParams;
 
-function GithubSignInForm({ callbackUrl }: GithubSignInFormProps) {
-    return (
-        <form action={signInWithGithub}>
-            {callbackUrl ? (
-                <input type="hidden" name="callbackUrl" value={callbackUrl} />
-            ) : null}
-            <button type="submit">Continue with GitHub</button>
-        </form>
-    );
-}
-
-export default function SignInPage() {
     return (
         <main>
             <h1>Sign In</h1>
-            <GithubSignInForm />
+            <GithubSignInForm callbackUrl={callbackUrl} />
         </main>
     );
 }

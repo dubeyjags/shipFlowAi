@@ -1,32 +1,139 @@
-# Better-Auth Setup in a Turborepo Monorepo
+# BetterAuth Setup — Turborepo Monorepo
 
-## Architecture Overview
+Complete reference from scratch to running auth: every file, what it does, why it exists, and how they connect.
+
+---
+
+## Architecture Diagram
 
 ```
 shipFlowAi/
+├── .env                              ← secrets (DATABASE_URL, BETTER_AUTH_SECRET, OAuth keys)
+│
 ├── packages/
-│   ├── db/              ← Step 1 · Prisma + database client
-│   └── auth/            ← Step 2 · better-auth server config
+│   ├── db/                           ← Step 1 · Prisma schema + singleton client
+│   │   ├── prisma/
+│   │   │   └── schema.prisma         ·  table definitions for User, Session, Account, …
+│   │   ├── prisma.config.ts          ·  Prisma 7 datasource config (connection URL)
+│   │   └── src/
+│   │       ├── index.ts              ·  exports `db` (the PrismaClient singleton)
+│   │       └── generated/prisma/     ·  auto-generated client (never edit manually)
+│   │
+│   ├── auth/                         ← Step 2 · BetterAuth server instance
+│   │   ├── lib/
+│   │   │   └── auth.ts               ·  betterAuth({ database, providers, plugins })
+│   │   └── index.ts                  ·  re-exports auth from lib/auth.ts
+│   │
+│   └── trpc/                         ← tRPC router (separate from auth, not covered here)
+│
 └── apps/
-    └── web/             ← Step 3 · Next.js wiring (API route, actions, client, pages)
+    └── web/                          ← Step 3 · Next.js 15 App Router wiring
+        ├── proxy.ts                  ·  middleware: session check → redirect or pass through
+        ├── next.config.ts            ·  transpilePackages for workspace ESM packages
+        ├── app/
+        │   ├── layout.tsx            ·  root layout (fonts, providers)
+        │   ├── api/
+        │   │   └── auth/
+        │   │       └── [...all]/
+        │   │           └── route.ts  ·  catch-all handler for all /api/auth/* requests
+        │   ├── (auth)/               ·  route group — public only (redirects if signed in)
+        │   │   ├── layout.tsx        ·    calls requireUnauth() → redirect if session exists
+        │   │   └── sign-in/
+        │   │       └── page.tsx      ·    renders <GithubSignInForm>
+        │   └── (protected)/          ·  route group — private only (redirects if signed out)
+        │       ├── layout.tsx        ·    calls getServerSession() → redirect if no session
+        │       └── dashboard/
+        │           ├── page.tsx      ·    server component reads session, renders UI
+        │           └── _components/
+        │               └── session-logger.tsx  · client component, logs session to browser console
+        ├── lib/
+        │   ├── auth-routes.ts        ·  path constants + getSafeCallbackPath()
+        │   ├── auth-session.ts       ·  getServerSession, requireAuth, requireUnauth
+        │   ├── auth-actions.ts       ·  server actions: signInWithGithub, signOut
+        │   └── auth-client.ts        ·  createAuthClient for use in client components
+        └── components/
+            └── auth/
+                ├── github-sign-in-form.tsx  · form with pending state
+                ├── sign-out-button.tsx      · form that calls signOut action
+                └── user-avatar.tsx          · image or initial fallback
 ```
 
-**Data flow:**
+---
+
+## Data Flow Diagram
+
 ```
-Browser → Next.js API Route (/api/auth/[...all])
-                │
-                ▼
-        @monorepo/auth  (better-auth instance)
-                │
-                ▼
-        @monorepo/db    (Prisma → PostgreSQL)
+┌─────────────────────────────────────────────────────────────────────┐
+│                         SIGN-IN FLOW                                │
+│                                                                     │
+│  Browser            Next.js App           BetterAuth        GitHub  │
+│    │                    │                     │               │     │
+│    │  GET /sign-in      │                     │               │     │
+│    │ ─────────────────► │                     │               │     │
+│    │                    │  requireUnauth()     │               │     │
+│    │                    │ ────────────────────►│               │     │
+│    │                    │  no session → OK     │               │     │
+│    │  renders page      │ ◄────────────────────│               │     │
+│    │ ◄─────────────────┤│                     │               │     │
+│    │                    │                     │               │     │
+│    │  submit form       │                     │               │     │
+│    │ ─────────────────► │                     │               │     │
+│    │                    │  signInWithGithub()  │               │     │
+│    │                    │  auth.api.signInSocial()             │     │
+│    │                    │ ────────────────────►│               │     │
+│    │                    │  { url: github.com/… }               │     │
+│    │                    │ ◄────────────────────│               │     │
+│    │  redirect(url)     │                     │               │     │
+│    │ ◄─────────────────┤│                     │               │     │
+│    │                    │                     │               │     │
+│    │  GET github.com/login/oauth/authorize     │               │     │
+│    │ ──────────────────────────────────────────────────────────►    │
+│    │  redirects to /api/auth/callback/github                   │    │
+│    │ ◄──────────────────────────────────────────────────────────    │
+│    │                    │                     │               │     │
+│    │  GET /api/auth/callback/github           │               │     │
+│    │ ─────────────────► │  route.ts handler   │               │     │
+│    │                    │ ────────────────────►│               │     │
+│    │                    │  validates code,    │               │     │
+│    │                    │  writes User +      │               │     │
+│    │                    │  Session + Account  │               │     │
+│    │                    │  rows to PostgreSQL │               │     │
+│    │                    │  sets session cookie│               │     │
+│    │  redirect /dashboard                     │               │     │
+│    │ ◄─────────────────┤│                     │               │     │
+└─────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                    PROTECTED ROUTE ACCESS                           │
+│                                                                     │
+│  Browser            proxy.ts          (protected)/layout   DB      │
+│    │                    │                     │             │       │
+│    │  GET /dashboard    │                     │             │       │
+│    │ ─────────────────► │                     │             │       │
+│    │                    │  auth.api.getSession()            │       │
+│    │                    │ ──────────────────────────────────►       │
+│    │                    │  session (or null)  │             │       │
+│    │                    │ ◄──────────────────────────────────       │
+│    │                    │                     │             │       │
+│    │  [no session] redirect /sign-in?callbackUrl=/dashboard │       │
+│    │ ◄─────────────────┤│                     │             │       │
+│    │                    │                     │             │       │
+│    │  [has session] sets x-pathname header, passes through  │       │
+│    │                    │ ────────────────────►│             │       │
+│    │                    │                     │  getServerSession() │
+│    │                    │                     │ ─────────────►      │
+│    │                    │                     │  session    │       │
+│    │                    │                     │ ◄─────────────      │
+│    │                    │  renders layout + page             │       │
+│    │ ◄──────────────────────────────────────────             │       │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
 ## Step 1 — Database Package (`packages/db`)
 
-This package owns the Prisma schema, the generated client, and the singleton `db` export that every other package uses.
+Owns the Prisma schema, generated client, and the `db` singleton exported to all packages.
 
 ---
 
@@ -34,53 +141,49 @@ This package owns the Prisma schema, the generated client, and the singleton `db
 
 ```json
 {
-  "name": "@monorepo/db",       // workspace package name — imported as @monorepo/db
-  "type": "module",             // ESM — required for Prisma 7 + Node adapter
-  "main": "src/index.ts",       // entry point consumed by other packages at dev time
-  "exports": {
-    ".": "./src/index.ts"       // what gets resolved when you write: import { db } from "@monorepo/db"
-  },
+  "name": "@monorepo/db",
+  "type": "module",
+  "main": "src/index.ts",
+  "exports": { ".": "./src/index.ts" },
   "scripts": {
-    "db:generate": "prisma generate",   // regenerate the Prisma client after schema changes
-    "db:push":     "prisma db push",    // sync schema → database (no migration files, good for dev)
-    "db:migrate":  "prisma migrate dev",// create migration files (use in production workflow)
-    "db:studio":   "prisma studio"      // open Prisma Studio GUI
+    "db:generate": "prisma generate",
+    "db:push":     "prisma db push",
+    "db:migrate":  "prisma migrate dev",
+    "db:studio":   "prisma studio"
   },
   "dependencies": {
-    "@prisma/adapter-pg": "^7.0.0",     // pg adapter required by Prisma 7 (driver adapters model)
-    "@prisma/client":     "^7.0.0",     // the generated client base
-    "pg":                 "^8.13.3",    // low-level PostgreSQL driver
-    "dotenv":             "^16.6.1"     // load .env at runtime (Prisma CLI also needs it)
+    "@prisma/adapter-pg": "^7.0.0",
+    "@prisma/client":     "^7.0.0",
+    "pg":                 "^8.13.3",
+    "dotenv":             "^16.6.1"
   }
 }
 ```
+
+- `"type": "module"` — required by Prisma 7's driver-adapter model (ESM only)
+- `@prisma/adapter-pg` — Prisma 7 dropped built-in connectors; you must pass a driver adapter
+- `dotenv` — loaded explicitly because the CLI doesn't auto-walk up to the root `.env`
 
 ---
 
 ### `packages/db/prisma.config.ts`
 
-> **Why this file exists:** Prisma 7 removed `url` from the `datasource` block in `schema.prisma`.
-> Connection details for Migrate/Push now live here instead.
+> **Why this file exists:** Prisma 7 moved the database connection URL out of `schema.prisma`
+> and into a separate config file. `schema.prisma` no longer has a `url` in its datasource block.
 
 ```ts
 import { config }       from "dotenv";
 import { defineConfig } from "prisma/config";
 
-// The root .env is two directories above packages/db.
-// Prisma CLI does not automatically walk up, so we load it manually.
-config({ path: "../../.env" });
+config({ path: "../../.env" });   // walk up two levels to the repo root .env
 
 const databaseUrl = process.env["DATABASE_URL"];
 if (!databaseUrl) throw new Error("DATABASE_URL is not set in .env");
 
 export default defineConfig({
-  schema: "prisma/schema.prisma",   // where the schema file lives (relative to this file)
-  migrations: {
-    path: "prisma/migrations",      // where migration files are stored
-  },
-  datasource: {
-    url: databaseUrl,               // the connection string used by Migrate / db push
-  },
+  schema:     "prisma/schema.prisma",
+  migrations: { path: "prisma/migrations" },
+  datasource: { url: databaseUrl },
 });
 ```
 
@@ -88,69 +191,63 @@ export default defineConfig({
 
 ### `packages/db/prisma/schema.prisma`
 
-> **Why no `url` in datasource:** Prisma 7 — connection URL moved to `prisma.config.ts` above.
-> The `output` path tells Prisma where to write the generated client.
+All models required by BetterAuth core + optional plugin fields (already present so you can
+enable plugins without a schema migration later).
 
 ```prisma
 generator client {
   provider = "prisma-client-js"
-  output   = "../src/generated/prisma"  // generated client lands next to src/index.ts
+  output   = "../src/generated/prisma"   // generated client lands at packages/db/src/generated/
 }
 
 datasource db {
-  provider = "postgresql"               // no url here in Prisma 7 — see prisma.config.ts
+  provider = "postgresql"                // no url here in Prisma 7 — see prisma.config.ts
 }
 
-// ── Core models (required by better-auth, always needed) ─────────────────────
+// ── Core models (always required) ────────────────────────────────────────────
 
 model User {
-  id            String    @id           // better-auth generates its own string IDs (not cuid/uuid)
+  id            String   @id
   name          String
-  email         String    @unique
+  email         String   @unique
   emailVerified Boolean
   image         String?
   createdAt     DateTime
   updatedAt     DateTime
 
-  // ── plugin: admin ──────────────────────────────────────────────────────────
-  // Enable with: import { admin } from "better-auth/plugins"
-  role       String?    // "admin" | "user" | custom
+  // plugin: admin
+  role       String?
   banned     Boolean?
   banReason  String?
   banExpires DateTime?
 
-  // ── plugin: username ────────────────────────────────────────────────────────
-  // Enable with: import { username } from "better-auth/plugins"
+  // plugin: username
   username        String? @unique
   displayUsername String?
 
-  // ── plugin: anonymous ───────────────────────────────────────────────────────
-  // Enable with: import { anonymous } from "better-auth/plugins"
+  // plugin: anonymous
   isAnonymous Boolean?
 
-  // ── plugin: phone-number ────────────────────────────────────────────────────
-  // Enable with: import { phoneNumber } from "better-auth/plugins"
+  // plugin: phone-number
   phoneNumber         String? @unique
   phoneNumberVerified Boolean?
 
-  // ── plugin: two-factor ──────────────────────────────────────────────────────
-  // Enable with: import { twoFactor } from "better-auth/plugins"
+  // plugin: two-factor
   twoFactorEnabled Boolean?
 
-  // Relations — Prisma needs these for type-safe joins
   sessions    Session[]
   accounts    Account[]
   twoFactors  TwoFactor[]
   members     Member[]
   invitations Invitation[]
 
-  @@map("user")   // actual table name in PostgreSQL (lowercase, snake_case)
+  @@map("user")
 }
 
 model Session {
   id        String   @id
   expiresAt DateTime
-  token     String   @unique    // the session token stored in the cookie
+  token     String   @unique    // stored in the browser cookie
   createdAt DateTime
   updatedAt DateTime
   ipAddress String?
@@ -158,29 +255,29 @@ model Session {
   userId    String
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  // ── plugin: admin ──────────────────────────────────────────────────────────
-  impersonatedBy String?         // set when an admin impersonates another user
+  // plugin: admin
+  impersonatedBy String?
 
-  // ── plugin: organization ────────────────────────────────────────────────────
-  activeOrganizationId String?   // tracks which org the user is currently acting as
+  // plugin: organization
+  activeOrganizationId String?
 
-  @@index([userId])   // index FK for fast lookups
+  @@index([userId])
   @@map("session")
 }
 
 model Account {
   id                    String    @id
-  accountId             String    // provider-specific user ID (e.g. GitHub user ID)
-  providerId            String    // "github" | "google" | "credential" etc.
+  accountId             String    // provider's own user ID
+  providerId            String    // "github" | "google" | "credential" …
   userId                String
   user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  accessToken           String?   @db.Text   // @db.Text for long OAuth tokens
+  accessToken           String?   @db.Text
   refreshToken          String?   @db.Text
   idToken               String?   @db.Text
   accessTokenExpiresAt  DateTime?
   refreshTokenExpiresAt DateTime?
   scope                 String?
-  password              String?   // hashed, only used for email+password provider
+  password              String?   // hashed; only set for email+password provider
   createdAt             DateTime
   updatedAt             DateTime
 
@@ -190,22 +287,22 @@ model Account {
 
 model Verification {
   id         String    @id
-  identifier String              // email address or phone being verified
-  value      String              // the OTP / magic-link token
+  identifier String
+  value      String
   expiresAt  DateTime
   createdAt  DateTime?
   updatedAt  DateTime?
 
-  @@index([identifier])   // fast lookups by email/phone during verification
+  @@index([identifier])
   @@map("verification")
 }
 
-// ── Plugin: two-factor ───────────────────────────────────────────────────────
+// ── Plugin models ─────────────────────────────────────────────────────────────
 
 model TwoFactor {
   id          String  @id
-  secret      String              // TOTP secret (never returned to client)
-  backupCodes String              // JSON array of hashed backup codes
+  secret      String
+  backupCodes String
   userId      String
   verified    Boolean @default(true)
   user        User    @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -214,15 +311,13 @@ model TwoFactor {
   @@map("twoFactor")
 }
 
-// ── Plugin: organization ─────────────────────────────────────────────────────
-
 model Organization {
   id          String       @id
   name        String
-  slug        String       @unique   // URL-safe identifier e.g. "acme-corp"
+  slug        String       @unique
   logo        String?
   createdAt   DateTime
-  metadata    String?                // JSON blob for custom fields
+  metadata    String?
   members     Member[]
   invitations Invitation[]
 
@@ -233,7 +328,7 @@ model Member {
   id             String       @id
   organizationId String
   userId         String
-  role           String       // "owner" | "admin" | "member"
+  role           String
   createdAt      DateTime
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -246,11 +341,11 @@ model Member {
 model Invitation {
   id             String       @id
   organizationId String
-  email          String       // who is being invited
+  email          String
   role           String?
   status         String       // "pending" | "accepted" | "rejected" | "canceled"
   expiresAt      DateTime
-  inviterId      String       // the user who sent the invite
+  inviterId      String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   user           User         @relation(fields: [inviterId], references: [id], onDelete: Cascade)
 
@@ -263,33 +358,25 @@ model Invitation {
 
 ### `packages/db/src/index.ts`
 
-> This file is the **only export** of `@monorepo/db`. Everything else imports `db` from here.
+Only export of `@monorepo/db`. Every package that needs the database imports `db` from here.
 
 ```ts
-import { config }     from "dotenv";
-import { PrismaPg }   from "@prisma/adapter-pg";
-import { PrismaClient } from "./generated/prisma/index.js"; // .js extension required for ESM
+import { config }       from "dotenv";
+import { PrismaPg }     from "@prisma/adapter-pg";
+import { PrismaClient } from "./generated/prisma/index.js";  // .js required for ESM
 
-// Load root .env at runtime (needed when this code runs inside Next.js dev server)
 config({ path: "../../.env" });
 
-// Singleton pattern: prevents creating a new PrismaClient on every hot reload in dev.
-// In production there is only one instance, so this is a no-op there.
-const globalForPrisma = globalThis as unknown as {
-  prisma: PrismaClient | undefined;
-};
+const globalForPrisma = globalThis as unknown as { prisma: PrismaClient | undefined };
 
 function createPrismaClient() {
   const url = process.env["DATABASE_URL"];
   if (!url) throw new Error("DATABASE_URL environment variable is not set");
-
-  // Prisma 7 requires a driver adapter instead of a built-in connector.
-  // PrismaPg wraps the `pg` package and handles the connection pool.
   const adapter = new PrismaPg({ connectionString: url });
   return new PrismaClient({ adapter });
 }
 
-// Reuse existing instance in development, create fresh one in production
+// Singleton: reuse on hot reload in dev, single instance in production.
 export const db = globalForPrisma.prisma ?? createPrismaClient();
 
 if (process.env["NODE_ENV"] !== "production") globalForPrisma.prisma = db;
@@ -297,16 +384,16 @@ if (process.env["NODE_ENV"] !== "production") globalForPrisma.prisma = db;
 
 ---
 
-### CLI commands (run from repo root)
+### CLI commands
 
 ```bash
-# After changing schema.prisma — push changes to the database (dev only, no migration files)
+# After editing schema.prisma — push schema to DB (dev only, no migration file)
 pnpm --filter @monorepo/db db:push
 
-# After pushing — regenerate the TypeScript client so your IDE sees the new types
+# Regenerate TypeScript types after schema changes
 pnpm --filter @monorepo/db db:generate
 
-# Production workflow — creates a SQL migration file you can review and commit
+# Production — create a SQL migration file you can review and commit
 pnpm --filter @monorepo/db db:migrate
 ```
 
@@ -314,8 +401,8 @@ pnpm --filter @monorepo/db db:migrate
 
 ## Step 2 — Auth Package (`packages/auth`)
 
-This package creates the single `auth` instance that is imported everywhere.
-Keep all better-auth server config here, never in `apps/`.
+Creates the single `auth` instance used across the entire monorepo.
+All BetterAuth server config lives here — never in `apps/`.
 
 ---
 
@@ -323,60 +410,53 @@ Keep all better-auth server config here, never in `apps/`.
 
 ```json
 {
-  "name": "@monorepo/auth",         // workspace package name
+  "name": "@monorepo/auth",
   "type": "module",
   "main": "index.ts",
-  "exports": {
-    ".": "./index.ts"               // import { auth } from "@monorepo/auth"
-  },
+  "exports": { ".": "./index.ts" },
   "dependencies": {
-    "@monorepo/db": "workspace:*",  // workspace:* resolves to the local packages/db
+    "@monorepo/db": "workspace:*",
     "better-auth":  "^1.6.20"
   }
 }
 ```
 
+`workspace:*` resolves to the local `packages/db` at build time.
+
 ---
 
 ### `packages/auth/lib/auth.ts`
 
-> **This is the heart of better-auth.** One instance, shared across the whole monorepo.
+The heart of BetterAuth. One instance, shared everywhere.
 
 ```ts
-import { betterAuth }     from "better-auth";
-import { prismaAdapter }  from "better-auth/adapters/prisma";
-import { nextCookies }    from "better-auth/next-js";
-import { db }             from "@monorepo/db";  // the singleton Prisma client
+import { betterAuth }    from "better-auth";
+import { prismaAdapter } from "better-auth/adapters/prisma";
+import { nextCookies }   from "better-auth/next-js";
+import { db }            from "@monorepo/db";
 
 export const auth = betterAuth({
-  // ── Security ──────────────────────────────────────────────────────────────
-  secret:  process.env.BETTER_AUTH_SECRET,  // random string, min 32 chars — signs sessions
-  baseURL: process.env.BETTER_AUTH_URL,     // e.g. http://localhost:3000 — used for redirects & CORS
+  secret:  process.env.BETTER_AUTH_SECRET,  // signs session tokens — min 32 chars
+  baseURL: process.env.BETTER_AUTH_URL,     // e.g. http://localhost:3000
 
-  // ── Database ───────────────────────────────────────────────────────────────
   database: prismaAdapter(db, {
-    provider: "postgresql",   // tells better-auth how to generate queries
+    provider: "postgresql",
   }),
 
-  // ── Social Providers ───────────────────────────────────────────────────────
-  // Each provider needs an OAuth app created on the provider's developer console.
-  // GitHub: https://github.com/settings/applications/new
-  //   · Homepage URL:      http://localhost:3000
-  //   · Callback URL:      http://localhost:3000/api/auth/callback/github
   socialProviders: {
     github: {
       clientId:     process.env.GITHUB_CLIENT_ID     as string,
       clientSecret: process.env.GITHUB_CLIENT_SECRET as string,
+      // Callback URL registered on GitHub: <BETTER_AUTH_URL>/api/auth/callback/github
     },
-    // Add more providers here: google, discord, twitter, etc.
   },
 
-  // ── Plugins ────────────────────────────────────────────────────────────────
   plugins: [
-    nextCookies(),  // Required for Next.js App Router: auto-sets cookies in server actions.
-                    // Must be the LAST plugin in the array.
+    // nextCookies() MUST be the last plugin.
+    // It intercepts the response to set cookies in server actions (App Router requirement).
+    nextCookies(),
 
-    // Uncomment to enable additional plugins (schema fields already added):
+    // Uncomment to enable (schema fields are already present):
     // twoFactor(),
     // organization(),
     // admin(),
@@ -390,9 +470,8 @@ export const auth = betterAuth({
 ### `packages/auth/index.ts`
 
 ```ts
-// Re-export everything from lib/auth.ts.
-// Consumers write:  import { auth } from "@monorepo/auth"
 export * from "./lib/auth";
+// consumers: import { auth } from "@monorepo/auth"
 ```
 
 ---
@@ -407,8 +486,8 @@ export * from "./lib/auth";
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  // Tell Next.js to transpile these workspace packages with its own compiler.
-  // Without this, importing ESM workspace packages causes build errors.
+  // ESM workspace packages must be transpiled by Next.js — without this you get
+  // "SyntaxError: Cannot use import statement in a CommonJS module"
   transpilePackages: ["@monorepo/auth", "@monorepo/db"],
 };
 
@@ -419,26 +498,23 @@ export default nextConfig;
 
 ### `apps/web/.env.local`
 
-> Copy these to `.env.local` for local development.
-> Never commit real secrets — use a secrets manager in production.
-
 ```bash
-# PostgreSQL connection string (Neon, Supabase, Railway, or local)
+# PostgreSQL connection string
 DATABASE_URL="postgresql://USER:PASSWORD@HOST/DB?sslmode=require"
 
-# Random secret for signing sessions — generate with: openssl rand -base64 32
+# Session signing secret — generate: openssl rand -base64 32
 BETTER_AUTH_SECRET=your-random-secret-here
 
-# Full URL of your app — used by better-auth for OAuth redirects
+# Full app URL — used for OAuth redirects
 BETTER_AUTH_URL=http://localhost:3000
 
-# GitHub OAuth app credentials
+# GitHub OAuth app
 # Create at: https://github.com/settings/applications/new
-# Callback URL must be: http://localhost:3000/api/auth/callback/github
+# Callback URL: http://localhost:3000/api/auth/callback/github
 GITHUB_CLIENT_ID=your-github-client-id
 GITHUB_CLIENT_SECRET=your-github-client-secret
 
-# Used by the auth client (browser-side) to know where to send requests
+# Exposed to the browser (NEXT_PUBLIC_ prefix required)
 NEXT_PUBLIC_APP_URL=http://localhost:3000
 ```
 
@@ -446,59 +522,171 @@ NEXT_PUBLIC_APP_URL=http://localhost:3000
 
 ### `apps/web/app/api/auth/[...all]/route.ts`
 
-> This is the **catch-all API route** that handles every better-auth HTTP request:
-> `/api/auth/signin`, `/api/auth/callback/github`, `/api/auth/signout`, etc.
-> You never call these URLs manually — better-auth's client handles it.
+The **catch-all API route** for BetterAuth. Handles every auth HTTP request:
+`/api/auth/sign-in`, `/api/auth/callback/github`, `/api/auth/sign-out`, etc.
+You never call these URLs manually — BetterAuth's client calls them for you.
 
 ```ts
-import { auth }             from "@monorepo/auth";
-import { toNextJsHandler }  from "better-auth/next-js";
+import { auth }            from "@monorepo/auth";
+import { toNextJsHandler } from "better-auth/next-js";
 
-// toNextJsHandler converts the better-auth fetch handler into Next.js route handlers.
-// The spread gives Next.js named exports for each HTTP method.
 export const { GET, POST, PUT, PATCH, DELETE } = toNextJsHandler(auth);
+```
+
+---
+
+### `apps/web/proxy.ts` (middleware)
+
+Runs on every request matched by `config.matcher`. Checks session before the route renders.
+Named `proxy.ts` instead of `middleware.ts` — Next.js still picks it up automatically.
+
+```
+Request
+   │
+   ▼
+proxy.ts
+   ├─ pathname === /sign-in ?
+   │     ├─ has session → redirect to callbackUrl (or /dashboard)
+   │     └─ no session  → allow through
+   │
+   └─ all other matched paths
+         ├─ has session → set x-pathname header, allow through
+         └─ no session  → redirect to /sign-in?callbackUrl=<original path>
+```
+
+```ts
+import { NextResponse } from "next/server";
+import type { NextRequest } from "next/server";
+import { auth } from "@monorepo/auth";
+import { SIGN_IN_PATH, getSafeCallbackPath } from "@/lib/auth-routes";
+
+export async function proxy(request: NextRequest) {
+  const { pathname } = request.nextUrl;
+  const session = await auth.api.getSession({ headers: request.headers });
+
+  if (pathname === SIGN_IN_PATH) {
+    if (session?.user) {
+      const callbackUrl = request.nextUrl.searchParams.get("callbackUrl");
+      return NextResponse.redirect(
+        new URL(getSafeCallbackPath(callbackUrl), request.url)
+      );
+    }
+    return NextResponse.next();
+  }
+
+  if (!session?.user) {
+    const callbackUrl = pathname + request.nextUrl.search;
+    return NextResponse.redirect(
+      new URL(
+        `${SIGN_IN_PATH}?callbackUrl=${encodeURIComponent(callbackUrl)}`,
+        request.url
+      )
+    );
+  }
+
+  // Pass x-pathname downstream so layout.tsx knows the current path for redirects.
+  const requestHeaders = new Headers(request.headers);
+  requestHeaders.set("x-pathname", pathname);
+  return NextResponse.next({ request: { headers: requestHeaders } });
+}
+
+export const config = {
+  matcher: ["/sign-in", "/dashboard", "/dashboard/:path*"],
+};
+```
+
+---
+
+### `apps/web/lib/auth-routes.ts`
+
+Centralises path strings and the open-redirect guard. Import path constants from here —
+never hardcode `/sign-in` or `/dashboard` in multiple files.
+
+```ts
+export const SIGN_IN_PATH         = "/sign-in";
+export const DEFAULT_AUTH_CALLBACK = "/dashboard";
+
+// Prevents open-redirect attacks: only allow same-origin relative paths.
+export function getSafeCallbackPath(callbackUrl: string | null | undefined): string {
+  if (!callbackUrl) return DEFAULT_AUTH_CALLBACK;
+  if (callbackUrl.startsWith("/") && !callbackUrl.startsWith("//")) {
+    return callbackUrl;
+  }
+  return DEFAULT_AUTH_CALLBACK;
+}
+```
+
+---
+
+### `apps/web/lib/auth-session.ts`
+
+Server-side session utilities. Import these in Server Components and layouts.
+Never import `auth` from `@monorepo/auth` directly in multiple components — centralise it here.
+
+```ts
+import { cache }    from "react";
+import { auth }     from "@monorepo/auth";
+import { headers }  from "next/headers";
+import { redirect } from "next/navigation";
+import { SIGN_IN_PATH, DEFAULT_AUTH_CALLBACK } from "@/lib/auth-routes";
+
+// cache() ensures a single DB round-trip per request even if called from multiple components.
+export const getServerSession = cache(async () => {
+  return auth.api.getSession({ headers: await headers() });
+});
+
+// Call in a Server Component or layout that requires the user to be logged in.
+// Redirects to /sign-in if no session exists.
+export async function requireAuth() {
+  const session = await getServerSession();
+  if (!session?.user) redirect(SIGN_IN_PATH);
+  return session!;
+}
+
+// Call in auth pages (sign-in, sign-up) to redirect away if already logged in.
+export async function requireUnauth() {
+  const session = await getServerSession();
+  if (session?.user) redirect(DEFAULT_AUTH_CALLBACK);
+}
 ```
 
 ---
 
 ### `apps/web/lib/auth-actions.ts`
 
-> **Server Actions** — run on the server, can be called directly from forms.
-> Import these in Client or Server Components; never import `auth` from `@monorepo/auth` in client components.
+Server Actions — run on the server, called directly from `<form action={…}>`.
+The only file in `apps/web` that imports `auth` from `@monorepo/auth`.
 
 ```ts
-"use server";   // marks this file as server-only (Next.js App Router)
+"use server";
 
 import { auth }     from "@monorepo/auth";
 import { headers }  from "next/headers";
 import { redirect } from "next/navigation";
+import { getSafeCallbackPath } from "@/lib/auth-routes";
 
 export async function signInWithGithub(formData: FormData) {
-  // Read optional callbackUrl from the form (useful for post-login redirects)
-  const callbackUrl = (formData.get("callbackUrl") as string | null) ?? "/dashboard";
+  const rawCallbackUrl = formData.get("callbackUrl") as string | null;
+  const callbackUrl = getSafeCallbackPath(rawCallbackUrl);
 
-  // auth.api.signInSocial tells better-auth to start the OAuth flow.
-  // It returns the GitHub authorization URL that we must redirect the user to.
-  // headers() is required by nextCookies() plugin to read/write cookies server-side.
   const result = await auth.api.signInSocial({
     body: {
       provider: "github",
-      callbackURL: callbackUrl,   // where better-auth redirects the user after GitHub auth
+      callbackURL: callbackUrl,   // where BetterAuth sends the user after GitHub auth
     },
-    headers: await headers(),
+    headers: await headers(),     // required by nextCookies() plugin
   });
 
-  console.log("[signInWithGithub] result:", result);  // debug: remove in production
-
-  // If something went wrong (bad env vars, provider error), result.url will be falsy.
-  // Throwing here surfaces the error instead of silently doing nothing.
   if (!result?.url) {
     throw new Error("GitHub sign-in failed: no redirect URL returned");
   }
 
-  // redirect() is a Next.js function that throws a special error caught by the framework.
-  // It must be called OUTSIDE try/catch blocks.
-  redirect(result.url);
+  redirect(result.url);           // must be outside try/catch
+}
+
+export async function signOut() {
+  await auth.api.signOut({ headers: await headers() });
+  redirect("/sign-in");
 }
 ```
 
@@ -506,59 +694,67 @@ export async function signInWithGithub(formData: FormData) {
 
 ### `apps/web/lib/auth-client.ts`
 
-> **Client-side auth helper** — use in Client Components (`"use client"`) only.
-> Provides hooks like `authClient.useSession()` and methods like `authClient.signOut()`.
+Client-side auth helper. Use only in `"use client"` components.
+Provides `authClient.useSession()` and `authClient.signOut()`.
 
 ```ts
 import { createAuthClient } from "better-auth/react";
 
 export const authClient = createAuthClient({
-  // The base URL where your API route is mounted.
-  // NEXT_PUBLIC_ prefix makes this env var available in the browser bundle.
   baseURL: process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000",
 });
 
 // Usage in a Client Component:
-//
-//   import { authClient } from "@/lib/auth-client"
-//
 //   const { data: session } = authClient.useSession()
 //   await authClient.signOut()
 ```
 
 ---
 
-### `apps/web/app/(auth)/sign-in/page.tsx`
+### Route Groups
 
-> The `(auth)` folder is a **Route Group** — it doesn't appear in the URL.
-> Sign-in page lives at `/sign-in`, not `/auth/sign-in`.
+Next.js **Route Groups** (folders wrapped in parentheses) let you share a layout without
+adding a URL segment. `(auth)` and `(protected)` don't appear in the URL.
+
+```
+URL /sign-in    → app/(auth)/sign-in/page.tsx       ← uses (auth) layout
+URL /dashboard  → app/(protected)/dashboard/page.tsx ← uses (protected) layout
+```
+
+---
+
+### `apps/web/app/(auth)/layout.tsx`
+
+Wraps all public auth pages. Redirects already-logged-in users away before rendering.
 
 ```tsx
-import { signInWithGithub } from "@/lib/auth-actions";
+import { requireUnauth } from "@/lib/auth-session";
 
-type GithubSignInFormProps = {
-  callbackUrl?: string;
-};
-
-function GithubSignInForm({ callbackUrl }: GithubSignInFormProps) {
-  return (
-    // The `action` prop on a <form> accepts a Server Action directly.
-    // On submit, Next.js calls signInWithGithub(formData) on the server.
-    <form action={signInWithGithub}>
-      {/* Hidden input passes the desired post-login destination to the server action */}
-      {callbackUrl ? (
-        <input type="hidden" name="callbackUrl" value={callbackUrl} />
-      ) : null}
-      <button type="submit">Continue with GitHub</button>
-    </form>
-  );
+export default async function AuthLayout({ children }: { children: React.ReactNode }) {
+  await requireUnauth();  // ← redirects to /dashboard if session exists
+  return <>{children}</>;
 }
+```
 
-export default function SignInPage() {
+---
+
+### `apps/web/app/(auth)/sign-in/page.tsx`
+
+Reads `callbackUrl` from the query string and passes it to the form component.
+
+```tsx
+import GithubSignInForm from "@/components/auth/github-sign-in-form";
+
+export default async function SignInPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ callbackUrl?: string }>;
+}) {
+  const { callbackUrl } = await searchParams;
   return (
     <main>
       <h1>Sign In</h1>
-      <GithubSignInForm />
+      <GithubSignInForm callbackUrl={callbackUrl} />
     </main>
   );
 }
@@ -566,99 +762,247 @@ export default function SignInPage() {
 
 ---
 
-### `apps/web/app/dashboard/page.tsx`
+### `apps/web/app/(protected)/layout.tsx`
 
-> A **Server Component** that reads the session server-side after login.
-> `auth.api.getSession` reads the session cookie set by `nextCookies()`.
+Wraps all private routes. Redirects to `/sign-in` if there's no session.
+Reads `x-pathname` header (set by `proxy.ts`) to build the `callbackUrl` redirect.
+Also renders the sidebar shell that all dashboard pages share.
 
 ```tsx
-import { auth }          from "@monorepo/auth";
-import { headers }       from "next/headers";
-import SessionLogger     from "./_session-logger";
+import { headers }          from "next/headers";
+import { redirect }         from "next/navigation";
+import { getServerSession } from "@/lib/auth-session";
+import { SIGN_IN_PATH }     from "@/lib/auth-routes";
+import { SidebarProvider, SidebarInset } from "@/components/ui/sidebar";
+import AppSidebar           from "@/components/app-sidebar";
 
-export default async function DashboardPage() {
-  // Read the session from the cookie on the server.
-  // headers() is needed so better-auth can read the Cookie header.
-  const session = await auth.api.getSession({
-    headers: await headers(),
-  });
+export default async function ProtectedLayout({ children }: { children: React.ReactNode }) {
+  const session = await getServerSession();
 
-  // Server-side log — visible in your terminal, not the browser.
-  console.log("[Dashboard] Login details:", JSON.stringify(session, null, 2));
+  if (!session?.user) {
+    const headersList = await headers();
+    const pathname    = headersList.get("x-pathname");
+    const redirectUrl = pathname
+      ? `${SIGN_IN_PATH}?callbackUrl=${encodeURIComponent(pathname)}`
+      : SIGN_IN_PATH;
+    redirect(redirectUrl);
+  }
 
   return (
-    <main>
-      <h1>Dashboard</h1>
-
-      {/* Client component logs the session to the browser console too */}
-      <SessionLogger session={session} />
-
-      {session?.user ? (
-        <p>Welcome, {session.user.name ?? session.user.email}</p>
-      ) : (
-        <p>Not signed in.</p>
-      )}
-    </main>
+    <SidebarProvider>
+      <AppSidebar user={session!.user} />
+      <SidebarInset>{children}</SidebarInset>
+    </SidebarProvider>
   );
 }
 ```
 
 ---
 
-### `apps/web/app/dashboard/_session-logger.tsx`
+### `apps/web/app/(protected)/dashboard/page.tsx`
 
-> Underscore prefix (`_`) is a Next.js convention to co-locate a file in a route folder
-> without making it a page. This is a **Client Component** that logs to browser devtools.
+Server Component — reads the cached session and renders the dashboard.
 
 ```tsx
-"use client";   // this file runs in the browser
+import { getServerSession }    from "@/lib/auth-session";
+import SessionLogger           from "./_components/session-logger";
+import { SidebarTrigger }      from "@/components/ui/sidebar";
+import { Separator }           from "@/components/ui/separator";
 
+export default async function DashboardPage() {
+  const session = await getServerSession();
+
+  return (
+    <>
+      <header className="flex h-12 shrink-0 items-center gap-2 border-b px-4">
+        <SidebarTrigger className="-ml-1" />
+        <Separator orientation="vertical" className="h-4" />
+        <span className="text-sm font-medium">Dashboard</span>
+      </header>
+      <div className="p-6">
+        <SessionLogger session={session} />
+        <h1 className="text-2xl font-semibold mb-1">Overview</h1>
+        <p className="text-muted-foreground">
+          Welcome back, {session!.user.name ?? session!.user.email}
+        </p>
+      </div>
+    </>
+  );
+}
+```
+
+---
+
+### `apps/web/app/(protected)/dashboard/_components/session-logger.tsx`
+
+Client Component that logs the session to browser DevTools on mount. The `_components/`
+prefix keeps it co-located with the route without exposing it as a page.
+
+```tsx
+"use client";
 import { useEffect } from "react";
 
 export default function SessionLogger({ session }: { session: unknown }) {
   useEffect(() => {
-    // Browser console log — open DevTools → Console to see the full session object
     console.log("[Login] Session details:", session);
-  }, [session]);   // runs once after mount (and again if session changes)
-
-  return null;     // renders nothing — purely for debugging
+  }, [session]);
+  return null;
 }
 ```
 
 ---
 
-## Request Flow Summary
+### `apps/web/components/auth/github-sign-in-form.tsx`
+
+Client Component. Uses `useFormStatus` to disable the button while the server action runs.
+
+```tsx
+"use client";
+import { useFormStatus }    from "react-dom";
+import { signInWithGithub } from "@/lib/auth-actions";
+
+function SubmitButton() {
+  const { pending } = useFormStatus();
+  return (
+    <button type="submit" disabled={pending}>
+      {pending ? "Redirecting…" : "Continue with GitHub"}
+    </button>
+  );
+}
+
+export default function GithubSignInForm({ callbackUrl }: { callbackUrl?: string }) {
+  return (
+    <form action={signInWithGithub}>
+      {callbackUrl && <input type="hidden" name="callbackUrl" value={callbackUrl} />}
+      <SubmitButton />
+    </form>
+  );
+}
+```
+
+---
+
+### `apps/web/components/auth/sign-out-button.tsx`
+
+```tsx
+import { signOut } from "@/lib/auth-actions";
+
+export default function SignOutButton() {
+  return (
+    <form action={signOut}>
+      <button type="submit">Sign Out</button>
+    </form>
+  );
+}
+```
+
+---
+
+### `apps/web/components/auth/user-avatar.tsx`
+
+Shows the user's profile image if available, otherwise falls back to their initial.
+
+```tsx
+type Props = { name?: string | null; email?: string | null; image?: string | null };
+
+function getInitial(name?: string | null, email?: string | null) {
+  return (name ?? email ?? "?")[0]!.toUpperCase();
+}
+
+export default function UserAvatar({ name, email, image }: Props) {
+  if (image) {
+    return (
+      <img src={image} alt={name ?? email ?? "User"} width={32} height={32}
+           className="rounded-full" />
+    );
+  }
+  return (
+    <span className="inline-flex h-8 w-8 items-center justify-center rounded-full
+                     bg-gray-200 text-sm font-medium text-gray-600">
+      {getInitial(name, email)}
+    </span>
+  );
+}
+```
+
+---
+
+## Complete Request Flow (Step by Step)
 
 ```
 1.  User visits /sign-in
+    → proxy.ts runs: no session → allow through
+    → (auth)/layout.tsx: requireUnauth() → no session → allow through
+    → sign-in/page.tsx renders <GithubSignInForm>
+
 2.  User clicks "Continue with GitHub"
-3.  Browser submits the <form> → calls signInWithGithub() server action
-4.  Server action calls auth.api.signInSocial() → better-auth returns GitHub OAuth URL
-5.  Next.js redirect(result.url) → browser goes to github.com/login/oauth/authorize
-6.  User approves → GitHub redirects to /api/auth/callback/github
-7.  Route handler (route.ts) → better-auth validates code, creates User+Account+Session rows
-8.  better-auth redirects browser to /dashboard (the callbackURL)
-9.  dashboard/page.tsx runs on server → auth.api.getSession() reads the session cookie
-10. Page renders welcome message; SessionLogger logs session to browser console
+    → browser submits <form> to signInWithGithub() server action
+
+3.  signInWithGithub() (server)
+    → auth.api.signInSocial({ provider: "github", callbackURL: "/dashboard" })
+    → BetterAuth returns { url: "https://github.com/login/oauth/authorize?…" }
+    → redirect(result.url) — browser is sent to GitHub
+
+4.  GitHub OAuth
+    → user approves on github.com
+    → GitHub redirects browser to /api/auth/callback/github?code=…
+
+5.  /api/auth/callback/github (route.ts)
+    → toNextJsHandler passes to BetterAuth
+    → BetterAuth exchanges code for access token
+    → creates/updates User + Account rows in PostgreSQL
+    → creates Session row, sets session cookie (via nextCookies() plugin)
+    → redirects browser to /dashboard
+
+6.  User visits /dashboard
+    → proxy.ts runs: session found → sets x-pathname header → allow through
+    → (protected)/layout.tsx: getServerSession() → session found → render layout
+    → dashboard/page.tsx: getServerSession() [cached, no extra DB call] → render page
+
+7.  User clicks Sign Out
+    → SignOutButton form submits signOut() server action
+    → auth.api.signOut() clears the session cookie
+    → redirect("/sign-in")
+```
+
+---
+
+## Protection Strategy — Two Layers
+
+Both layers check independently. The middleware is fast but runs before the React tree;
+the layout catches anything the middleware matcher misses.
+
+```
+Layer 1 — proxy.ts (middleware)
+  ├─ Runs before the page renders
+  ├─ matcher: ["/sign-in", "/dashboard", "/dashboard/:path*"]
+  ├─ Fast: one DB call, then redirect or pass
+  └─ Sets x-pathname header so the layout knows the real path
+
+Layer 2 — (protected)/layout.tsx
+  ├─ Runs inside the React tree (after middleware)
+  ├─ Covers every route under (protected)/ automatically
+  ├─ Reads x-pathname header to build callbackUrl for redirect
+  └─ getServerSession() is cached — no duplicate DB query
 ```
 
 ---
 
 ## Adding a New Social Provider (e.g. Google)
 
-**1. Create OAuth credentials** at `https://console.cloud.google.com/`
-   - Callback URL: `http://localhost:3000/api/auth/callback/google`
+**1. Create OAuth credentials** — [Google Cloud Console](https://console.cloud.google.com/)
+   - Authorized redirect URI: `http://localhost:3000/api/auth/callback/google`
 
-**2. Add to `.env.local`:**
+**2. Add to `.env.local`**
 ```bash
-GOOGLE_CLIENT_ID=your-id
-GOOGLE_CLIENT_SECRET=your-secret
+GOOGLE_CLIENT_ID=your-google-client-id
+GOOGLE_CLIENT_SECRET=your-google-client-secret
 ```
 
-**3. Add to `packages/auth/lib/auth.ts`:**
+**3. Add to `packages/auth/lib/auth.ts`**
 ```ts
 socialProviders: {
-  github: { ... },
+  github: { … },
   google: {
     clientId:     process.env.GOOGLE_CLIENT_ID     as string,
     clientSecret: process.env.GOOGLE_CLIENT_SECRET as string,
@@ -666,10 +1010,10 @@ socialProviders: {
 },
 ```
 
-**4. Add a button in `apps/web/lib/auth-actions.ts`:**
+**4. Add a server action in `apps/web/lib/auth-actions.ts`**
 ```ts
 export async function signInWithGoogle(formData: FormData) {
-  const callbackUrl = (formData.get("callbackUrl") as string | null) ?? "/dashboard";
+  const callbackUrl = getSafeCallbackPath(formData.get("callbackUrl") as string | null);
   const result = await auth.api.signInSocial({
     body: { provider: "google", callbackURL: callbackUrl },
     headers: await headers(),
@@ -679,35 +1023,64 @@ export async function signInWithGoogle(formData: FormData) {
 }
 ```
 
-No schema changes needed — the existing `Account` model handles all providers.
+**5. Add a form component in `apps/web/components/auth/`**
+
+No schema changes needed. The existing `Account` model handles all providers.
 
 ---
 
-## Adding a Plugin (e.g. Two-Factor)
+## Enabling a Plugin (e.g. Two-Factor)
 
-**1. The schema fields are already in `schema.prisma`** (added in the all-models step).
-   Run `db:push` only if you add a NEW model/field.
+The Prisma schema already has the `TwoFactor` model — no schema migration needed.
 
-**2. Update `packages/auth/lib/auth.ts`:**
+**1. Update `packages/auth/lib/auth.ts`**
 ```ts
 import { twoFactor } from "better-auth/plugins";
 
-export const auth = betterAuth({
-  ...
-  plugins: [
-    twoFactor(),    // add before nextCookies()
-    nextCookies(),  // nextCookies() must always be last
-  ],
-});
+plugins: [
+  twoFactor(),   // add before nextCookies()
+  nextCookies(), // must always be last
+],
 ```
 
-**3. Update the auth client `apps/web/lib/auth-client.ts`:**
+**2. Update `apps/web/lib/auth-client.ts`**
 ```ts
-import { createAuthClient } from "better-auth/react";
-import { twoFactorClient }  from "better-auth/client/plugins";
+import { createAuthClient }  from "better-auth/react";
+import { twoFactorClient }   from "better-auth/client/plugins";
 
 export const authClient = createAuthClient({
   baseURL: process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000",
   plugins: [twoFactorClient()],
 });
+```
+
+---
+
+## Key Relationships at a Glance
+
+```
+packages/db/src/index.ts
+  └─ exports `db` (PrismaClient singleton)
+       └─ consumed by packages/auth/lib/auth.ts
+            └─ exports `auth` (BetterAuth instance)
+                 ├─ consumed by apps/web/app/api/auth/[...all]/route.ts  (HTTP handler)
+                 ├─ consumed by apps/web/lib/auth-actions.ts              (server actions)
+                 ├─ consumed by apps/web/lib/auth-session.ts              (session helpers)
+                 └─ consumed by apps/web/proxy.ts                         (middleware)
+
+apps/web/lib/auth-routes.ts
+  └─ exports SIGN_IN_PATH, DEFAULT_AUTH_CALLBACK, getSafeCallbackPath
+       ├─ consumed by auth-session.ts
+       ├─ consumed by auth-actions.ts
+       └─ consumed by proxy.ts
+
+apps/web/lib/auth-session.ts
+  └─ exports getServerSession, requireAuth, requireUnauth
+       ├─ consumed by (auth)/layout.tsx      (requireUnauth)
+       ├─ consumed by (protected)/layout.tsx  (getServerSession)
+       └─ consumed by (protected)/dashboard/page.tsx (getServerSession)
+
+apps/web/lib/auth-client.ts
+  └─ exports authClient (browser-only)
+       └─ consumed by any "use client" component that needs session/signOut
 ```
