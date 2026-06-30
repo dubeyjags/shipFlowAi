@@ -145,3 +145,4 @@ vite.config.ts.timestamp-*
 # Prisma generated client
 src/generated/
 packages/db/src/generated/prisma
+*.pem

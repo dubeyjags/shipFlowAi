@@ -6,6 +6,11 @@ import {
     IconDashboard,
     IconFlask,
     IconLogout,
+    IconLayoutGrid,
+    IconDatabase,
+    IconGitPullRequest,
+    IconApps,
+    IconSettings,
 } from "@tabler/icons-react"
 import {
     Sidebar,
@@ -32,6 +37,14 @@ type User = {
 const navItems = [
     { title: "Dashboard", url: "/dashboard", icon: IconDashboard },
     { title: "Test", url: "/test", icon: IconFlask },
+]
+
+const githubNavItems = [
+    { title: "Overview",     url: "/dashboard/github",               icon: IconLayoutGrid },
+    { title: "Repositories", url: "/dashboard/github/repositories",  icon: IconDatabase },
+    { title: "Pull Requests", url: "/dashboard/github/pull-requests", icon: IconGitPullRequest },
+    { title: "GitHub App",   url: "/dashboard/github/app",           icon: IconApps },
+    { title: "Settings",     url: "/dashboard/github/settings",      icon: IconSettings },
 ]
 
 export default function AppSidebar({ user }: { user: User }) {
@@ -61,9 +74,30 @@ export default function AppSidebar({ user }: { user: User }) {
                                 <SidebarMenuItem key={item.url}>
                                     <SidebarMenuButton
                                         render={<Link href={item.url} />}
+                                        isActive={pathname === item.url}
+                                        tooltip={item.title}
+                                    >
+                                        <item.icon />
+                                        <span>{item.title}</span>
+                                    </SidebarMenuButton>
+                                </SidebarMenuItem>
+                            ))}
+                        </SidebarMenu>
+                    </SidebarGroupContent>
+                </SidebarGroup>
+
+                <SidebarGroup>
+                    <SidebarGroupLabel>GitHub</SidebarGroupLabel>
+                    <SidebarGroupContent>
+                        <SidebarMenu>
+                            {githubNavItems.map((item) => (
+                                <SidebarMenuItem key={item.url}>
+                                    <SidebarMenuButton
+                                        render={<Link href={item.url} />}
                                         isActive={
-                                            pathname === item.url ||
-                                            pathname.startsWith(item.url + "/")
+                                            item.url === "/dashboard/github"
+                                                ? pathname === item.url
+                                                : pathname.startsWith(item.url)
                                         }
                                         tooltip={item.title}
                                     >

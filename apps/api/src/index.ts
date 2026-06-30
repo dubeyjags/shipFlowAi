@@ -4,6 +4,14 @@ import cors from "cors";
 // import { createUserSchema } from "@monorepo/utils";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
 import { appRouter } from "@monorepo/trpc";
+
+process.on("uncaughtException", (err) => {
+    console.error("[uncaughtException]", err);
+});
+process.on("unhandledRejection", (reason) => {
+    console.error("[unhandledRejection]", reason);
+});
+
 const app = express();
 const PORT = 5000;
 app.use(express.json());

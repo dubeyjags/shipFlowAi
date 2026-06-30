@@ -46,11 +46,12 @@ model User {
   // plugin: two-factor
   twoFactorEnabled Boolean?
 
-  sessions    Session[]
-  accounts    Account[]
-  twoFactors  TwoFactor[]
-  members     Member[]
-  invitations Invitation[]
+  sessions             Session[]
+  accounts             Account[]
+  twoFactors           TwoFactor[]
+  members              Member[]
+  invitations          Invitation[]
+  githubInstallations  GithubInstallation[]
 
   @@map("user")
 }
@@ -164,4 +165,50 @@ model Invitation {
 
   @@index([organizationId])
   @@map("invitation")
+}
+
+// ── Reviews ───────────────────────────────────────────────────────────────────
+
+model PullRequest {
+  id              String    @id @default(cuid())
+  installationId  Int
+  repoFullName    String
+  prNumber        Int
+  title           String
+  authorLogin     String?
+  headSha         String
+  baseBranch      String
+  status          String    @default("pending")
+  reviewComment   String?
+  reviewedAt      DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@unique([repoFullName, prNumber])
+  @@map("pull_request")
+}
+
+// ── GitHub App ────────────────────────────────────────────────────────────────
+
+model GithubInstallation {
+  id                  String    @id @default(cuid())
+  installationId      Int       @unique
+  accountLogin        String
+  accountType         String
+  accountAvatarUrl    String?
+  appId               Int
+  repositorySelection String
+  suspended           Boolean   @default(false)
+  suspendedAt         DateTime?
+  htmlUrl             String?
+  targetId            Int
+  targetType          String
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("github_installation")
 }
